@@ -1,0 +1,12 @@
+streamlit
+google-generativeai
+openai
+numpy
+scikit-learn
+pydantic<3
+PyPDF2
+pdfminer.six
+reportlab
+faster-whisper
+pydub
+PyYAML

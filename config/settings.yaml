@@ -1,0 +1,36 @@
+app:
+  name: "AI Teaching Assistant"
+  upload_dir: "uploads"
+  db_path: "data/app.db"
+
+models:
+  embedding_provider: "gemini"
+  embedding_model: "text-embedding-004"
+  llm_provider: "gemini"
+  llm_model: "gemini-1.5-flash"
+  stt_provider: "local"   # dev: local, prod: openai
+  stt_model: "whisper-1"  # prod modeli (openai kullanıldığında)
+  # Yerel PyTorch Whisper için ayarlar (Plan B)
+  stt_local_backend: "torch"   # torch | ctranslate2
+  stt_local_device: "cuda"     # cuda | cpu
+  stt_local_language: "tr"     # tr | auto
+  stt_local_model: "medium"    # tiny|base|small|medium|large-v2
+  stt_local_beam_size: 1        # hız için düşük
+
+metrics:
+  target_wpm_range: [130, 160]
+  similarity_thresholds:
+    covered: 0.78
+    partial: 0.60
+
+weights:
+  coverage: 0.5
+  delivery: 0.3
+  pedagogy: 0.2
+
+filler_words:
+  tr: ["şey", "yani", "ee", "eee", "ıı", "hani", "aslında", "şimdi", "bakın"]
+  en: ["um", "uh", "like", "you know", "so", "actually", "basically", "well"]
+
+export:
+  formats: ["json", "md", "pdf"]

@@ -1,0 +1,56 @@
+{
+  "meta": { "lecture_id": "demo-001", "duration_sec": 420, "created_at": "2025-09-10T12:00:00Z" },
+  "scores": {
+    "coverage": 82.4,
+    "delivery": 74.9,
+    "pedagogy": 76.5,
+    "overall": 78.7,
+    "weights": { "coverage": 0.5, "delivery": 0.3, "pedagogy": 0.2 }
+  },
+  "coverage": {
+    "total_chunks": 58,
+    "covered_chunks": 42,
+    "partial_chunks": 9,
+    "missing_chunks": 7,
+    "missing_topics": [
+      { "title": "Zincir Kuralı", "importance": 0.91, "suggestion": "Kısa örnekle açıklayıcı bir blok ekleyin." }
+    ]
+  },
+  "delivery": {
+    "wpm": 148,
+    "target_wpm_range": [130,160],
+    "filler_rate": 0.023,
+    "filler_examples": ["yani", "eee"],
+    "pause_stats": { "count": 37, "avg_ms": 820, "long_pauses": 6 },
+    "repetition": { "top_ngrams": [{"ngram":"çok önemli","count":7}] }
+  },
+  "pedagogy": {
+    "clarity": 78,
+    "example_density": 0.18,
+    "engagement": 65,
+    "sequencing": 82,
+    "jargon_management": 71,
+    "notes": ["Örnek kullanım oranı hedef aralığın altında."]
+  },
+  "progress": {
+    "previous_overall": 73.2,
+    "delta_overall": 5.5,
+    "deteriorated_metrics": ["Filler Control"],
+    "improved_metrics": ["Coverage","Example Density"]
+  },
+  "export": {
+    "available_formats": ["json","md","pdf"],
+    "generated": ["json"]
+  },
+  "charts_payload": {
+    "radar": [
+      {"axis":"Coverage","value":0.824},
+      {"axis":"Pace","value":0.88},
+      {"axis":"Filler Control","value":0.77},
+      {"axis":"Repetition","value":0.81},
+      {"axis":"Pauses","value":0.69},
+      {"axis":"Clarity","value":0.78},
+      {"axis":"Engagement","value":0.65}
+    ]
+  }
+}
