@@ -138,3 +138,139 @@ Sonuç""".strip()
         import pandas as pd
         df = pd.DataFrame(cov['topics'])
         st.dataframe(df, use_container_width=True)
+
+    st.divider()
+    st.header("🗣️ Adım 4: Delivery Analizi")
+    st.caption("Transkript süresine göre konuşma hızı, filler oranı, çeşitlilik ve duraklamalar.")
+    if 'source_text' not in st.session_state:
+        st.info("Önce materyali yükleyin (Adım 1).")
+    else:
+        with st.expander("Transkript giriş (manuel veya STT çıktısı yapıştır)", expanded=False):
+            default_tx = st.session_state.get('transcript_text') or st.session_state['source_text'][:1000]
+            transcript_text = st.text_area("Transkript", value=default_tx, height=200)
+            st.session_state['transcript_text'] = transcript_text
+        colA, colB = st.columns(2)
+        with colA:
+            duration_min = st.number_input("Süre (dakika)", min_value=0.0, value=0.0, step=0.5, help="0 girersen tahmini süre (150 WPM varsayımı) kullanılır.")
+        with colB:
+            show_config = st.checkbox("Konfig detaylarını göster", value=False)
+        if st.button("Delivery Hesapla", type="primary"):
+            from app.core.delivery import compute_delivery_metrics
+            import yaml, os
+            cfg_path = os.path.join('config','settings.yaml')
+            custom_cfg = {}
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, 'r', encoding='utf-8') as f:
+                        y = yaml.safe_load(f) or {}
+                        delivery_cfg = y.get('metrics', {}).get('delivery', {})
+                        # weights alt yapısını compute fonksiyonundaki beklenen forma uydur.
+                        custom_cfg.update(delivery_cfg)
+                except Exception:
+                    pass
+            with st.spinner("Delivery metrikleri hesaplanıyor..."):
+                res = compute_delivery_metrics(transcript_text, duration_minutes=duration_min, config=custom_cfg)
+                st.session_state['delivery'] = res
+            st.success("Delivery analizi tamam.")
+        if 'delivery' in st.session_state:
+            res = st.session_state['delivery']
+            raw = res['raw']
+            scores = res['scores']
+            st.subheader("Skorlar")
+            cols = st.columns(5)
+            metric_map = [
+                ('WPM', 'wpm'),
+                ('Filler', 'filler'),
+                ('Repetition', 'repetition'),
+                ('Sentence Len', 'sentence_length'),
+                ('Pause', 'pause'),
+            ]
+            for (label, key), c in zip(metric_map, cols):
+                c.metric(label, f"{scores[key]:.2f}")
+            st.metric("Delivery Toplam", f"{scores['delivery_score']:.2f}")
+            with st.expander("Ham Değerler", expanded=False):
+                st.write({k: v for k, v in raw.items() if k != 'insufficient_data'})
+                if raw['insufficient_data']:
+                    st.warning("Kelime sayısı çok düşük: Normalizasyon devre dışı (0 skor). Daha uzun transkript sağlayın.")
+            if show_config:
+                with st.expander("Kullanılan Konfig", expanded=False):
+                    st.write(res['config_used'])
+
+        st.divider()
+        st.header("🧭 Adım 5: Pedagogy Analizi")
+        st.caption("Örnekler, sorular, signposting, tanımlar ve özet heuristikleri.")
+        if 'transcript_text' not in st.session_state:
+            st.info("Delivery adımında veya transkript girişinde metin kaydedin.")
+        else:
+            ped_col1, ped_col2 = st.columns([2,1])
+            with ped_col1:
+                show_ped_cfg = st.checkbox("Pedagogy konfig detayları", value=False)
+            with ped_col2:
+                limit_preview = st.checkbox("Transkript önizle (ilk 600 char)", value=False)
+            if limit_preview:
+                st.code(st.session_state['transcript_text'][:600])
+            if st.button("Pedagogy Hesapla", type="primary"):
+                from app.core.pedagogy import compute_pedagogy_metrics
+                import yaml, os
+                ped_cfg = {}
+                cfg_path = os.path.join('config','settings.yaml')
+                if os.path.exists(cfg_path):
+                    try:
+                        with open(cfg_path, 'r', encoding='utf-8') as f:
+                            y = yaml.safe_load(f) or {}
+                            ped_cfg = y.get('metrics', {}).get('pedagogy', {})
+                    except Exception:
+                        pass
+                with st.spinner("Pedagogy metrikleri hesaplanıyor..."):
+                    ped = compute_pedagogy_metrics(st.session_state['transcript_text'], config=ped_cfg)
+                    st.session_state['pedagogy'] = ped
+                st.success("Pedagogy analizi tamam.")
+            if 'pedagogy' in st.session_state:
+                ped = st.session_state['pedagogy']
+                pscores = ped['scores']
+                praw = ped['raw']
+                st.subheader("Pedagogy Skorları")
+                cols = st.columns(6)
+                metric_keys = ['examples','questions','signposting','definitions','summary','balance_bonus']
+                for key, c in zip(metric_keys, cols):
+                    c.metric(key.capitalize(), f"{pscores.get(key,0):.2f}")
+                st.metric("Pedagogy Toplam", f"{pscores['pedagogy_score']:.2f}")
+                with st.expander("Ham Sayımlar / Oranlar", expanded=False):
+                    st.write(praw)
+                    if praw['insufficient_data']:
+                        st.warning("Cümle sayısı yetersiz (< min_sentences). Skorlar 0.")
+                if show_ped_cfg:
+                    with st.expander("Konfig", expanded=False):
+                        st.write(ped['config_used'])
+
+        st.divider()
+        st.header("📈 Adım 6: Genel Skor Dashboard")
+        from app.core.scoring import aggregate_scores
+        cov_obj = st.session_state.get('coverage')
+        del_obj = st.session_state.get('delivery')
+        ped_obj = st.session_state.get('pedagogy')
+        if not (cov_obj or del_obj or ped_obj):
+            st.info("Önce en az bir analiz (coverage / delivery / pedagogy) üretin.")
+        else:
+            agg = aggregate_scores(cov_obj, del_obj, ped_obj)
+            total = agg['total_score']
+            inputs = agg['inputs']
+            # renk seçimi
+            if total >= 0.8:
+                color = '🟢'
+            elif total >= 0.6:
+                color = '🟡'
+            else:
+                color = '🔴'
+            st.subheader(f"Toplam Skor: {color} {total:.2f}")
+            colA, colB, colC = st.columns(3)
+            colA.metric("Coverage", f"{inputs['coverage']:.2f}")
+            colB.metric("Delivery", f"{inputs['delivery']:.2f}")
+            colC.metric("Pedagogy", f"{inputs['pedagogy']:.2f}")
+            with st.expander("Ağırlıklar ve Detay", expanded=False):
+                st.write({
+                    'weights_used': agg['weights_used'],
+                    'raw_inputs': inputs,
+                })
+            st.caption("Renk Eşiği: >=0.80 yeşil, 0.60–0.79 sarı, <0.60 kırmızı")
+

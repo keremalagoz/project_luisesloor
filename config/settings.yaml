@@ -22,6 +22,35 @@ metrics:
   similarity_thresholds:
     covered: 0.78
     partial: 0.60
+  delivery:
+    ideal_wpm_min: 130
+    ideal_wpm_max: 170
+    filler_tolerance: 0.05
+    diversity_target: 0.55
+    sentence_len_min: 8
+    sentence_len_max: 24
+    pause_tolerance: 0.10
+    weights:
+      wpm: 0.25
+      filler: 0.25
+      repetition: 0.25
+      sentence_length: 0.15
+      pause: 0.10
+  pedagogy:
+    targets:
+      examples: 0.15
+      questions: 0.10
+      signposting: 0.18
+      definitions: 0.08
+      summary: 0.04
+    weights:
+      examples: 0.25
+      questions: 0.20
+      signposting: 0.20
+      definitions: 0.15
+      summary: 0.15
+      balance_bonus: 0.05
+    min_sentences: 10
 
 weights:
   coverage: 0.5
