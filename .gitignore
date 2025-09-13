@@ -22,3 +22,5 @@ uploads/
 
 # Streamlit
 .streamlit/secrets.toml
+.cache/
+tester_python.ipynb/

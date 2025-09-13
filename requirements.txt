@@ -10,3 +10,4 @@ reportlab
 faster-whisper
 pydub
 PyYAML
+tiktoken
