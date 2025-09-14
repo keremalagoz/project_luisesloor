@@ -62,13 +62,16 @@ st.header("🔗 Adım 2: Chunking & Embeddings")
 if 'source_text' not in st.session_state:
     st.info("Önce Adım 1'de materyal yükleyip onayla.")
 else:
-    col1, col2, col3 = st.columns([1,1,1])
+    col1, col2, col3, col4 = st.columns([1,1,1,1])
     with col1:
         max_tokens = st.number_input("Max tokens", min_value=100, max_value=1200, value=450, step=50)
     with col2:
         overlap = st.number_input("Overlap tokens", min_value=0, max_value=400, value=50, step=10)
     with col3:
         min_chunk_tokens = st.number_input("Min chunk tokens", min_value=5, max_value=200, value=20, step=5)
+    with col4:
+        use_real_embed = st.checkbox("Gerçek Embedding", value=False, help="Gemini API key tanımlıysa gerçek modeli çağırır, yoksa fake fallback.")
+    model_name = st.text_input("Embedding Model", value="text-embedding-004", help="Gerekirse model adını değiştir.")
 
     if st.button("Chunk Oluştur", type="primary"):
         chunks = tokenize_and_chunk(
@@ -85,11 +88,14 @@ else:
         if show:
             for ch in st.session_state['chunks'][:5]:
                 st.code(f"{ch['id']} | tokens={ch['token_count']}\n" + ch['text'][:300] + ('...' if len(ch['text'])>300 else ''))
-        if st.button("Embeddings Hesapla (placeholder)"):
+        if st.button("Embeddings Hesapla"):
             with st.spinner("Embedding hesaplanıyor / cache kontrol ediliyor..."):
-                embedded = get_or_compute_embeddings(st.session_state['chunks'], model='text-embedding-004', use_real=False)
+                embedded = get_or_compute_embeddings(st.session_state['chunks'], model=model_name, use_real=use_real_embed)
                 st.session_state['embedded_chunks'] = embedded
-            st.success("Embeddings hazır (fake). Gerçek API entegrasyonu TODO.")
+            if use_real_embed:
+                st.success("Embeddings hazır (GERÇEK veya fallback).")
+            else:
+                st.success("Embeddings hazır (fake).")
     if 'embedded_chunks' in st.session_state:
         emb_list = st.session_state['embedded_chunks']
         if not emb_list:
@@ -273,4 +279,135 @@ Sonuç""".strip()
                     'raw_inputs': inputs,
                 })
             st.caption("Renk Eşiği: >=0.80 yeşil, 0.60–0.79 sarı, <0.60 kırmızı")
+
+            # Kalıcı kayıt (isteğe bağlı)
+            st.divider()
+            st.subheader("💾 Kalıcı Kayıt (SQLite)")
+            st.caption("Bu çalışmayı veritabanına kaydedip geçmişte tekrar görüntüleyebilirsin.")
+            save_col1, save_col2 = st.columns([1,2])
+            db_path = None
+            # config/settings.yaml içinden yol okunabilir; dinamik parse gerekirse burada yapılabilir.
+            import yaml, os
+            cfg_file = os.path.join('config','settings.yaml')
+            if os.path.exists(cfg_file):
+                try:
+                    with open(cfg_file,'r',encoding='utf-8') as f:
+                        y = yaml.safe_load(f) or {}
+                        db_path = (y.get('app') or {}).get('db_path')
+                except Exception:
+                    db_path = None
+
+            if st.button("Run Kaydet", type="primary"):
+                try:
+                    from app.core import storage
+                    storage.init_db(db_path)
+                    source_meta = st.session_state.get('source_meta') or {
+                        'filename':'bilinmiyor.txt',
+                        'size_mb': None,
+                        'stats': {}
+                    }
+                    material_id = storage.insert_material(source_meta, db_path=db_path)
+                    run_id = storage.insert_run(material_id, agg, coverage=cov_obj, delivery=del_obj, pedagogy=ped_obj, db_path=db_path)
+                    if cov_obj:
+                        storage.bulk_insert_topics(run_id, cov_obj, db_path=db_path)
+                        storage.insert_coverage_metrics(run_id, cov_obj, db_path=db_path)
+                    if del_obj:
+                        storage.insert_delivery_metrics(run_id, del_obj, db_path=db_path)
+                    if ped_obj:
+                        storage.insert_pedagogy_metrics(run_id, ped_obj, db_path=db_path)
+                    st.session_state['last_run_id'] = run_id
+                    st.success(f"Run kaydedildi (ID={run_id}).")
+                except Exception as e:
+                    st.error(f"Kayıt başarısız: {e}")
+
+            if 'last_run_id' in st.session_state:
+                st.info(f"Son kaydedilen run ID: {st.session_state['last_run_id']}")
+
+            with st.expander("Son Kayıtlar", expanded=False):
+                try:
+                    from app.core import storage as _stg
+                    if db_path:
+                        recent = _stg.fetch_recent_runs(db_path=db_path)
+                    else:
+                        recent = _stg.fetch_recent_runs()
+                    if not recent:
+                        st.write("Kayıt yok.")
+                    else:
+                        import pandas as pd
+                        st.dataframe(pd.DataFrame(recent), use_container_width=True)
+                except Exception as e:
+                    st.warning(f"Geçmiş okunamadı: {e}")
+
+            # Rapor oluşturma & indirme bölümü
+            st.divider()
+            st.subheader("📤 Rapor İndir (Beta)")
+            st.caption("Mevcut üretilmiş modüllerden rapor derlenir. Eksik modüller atlanır.")
+            colr1, colr2, colr3 = st.columns([1,1,2])
+            with colr1:
+                gen_btn = st.button("Raporu Oluştur", type="secondary")
+            with colr2:
+                auto_refresh = st.checkbox("Oto yenile", value=False, help="Her görüntülemede yeniden üret.")
+
+            if gen_btn or auto_refresh:
+                from app.core.report import build_report_data, render_markdown, export_json
+                from datetime import datetime
+                source_meta = st.session_state.get('source_meta') or {
+                    'filename': 'bilinmiyor.txt',
+                    'stats': {}
+                }
+                report_data = build_report_data(
+                    source_meta=source_meta,
+                    coverage=cov_obj,
+                    delivery=del_obj,
+                    pedagogy=ped_obj,
+                    scoring=agg,
+                )
+                md_text = render_markdown(report_data)
+                json_text = export_json(report_data)
+                st.session_state['report_data'] = report_data
+                st.session_state['report_markdown'] = md_text
+                st.session_state['report_json'] = json_text
+                st.success("Rapor oluşturuldu.")
+
+            if 'report_data' in st.session_state:
+                with st.expander("Markdown Önizleme", expanded=False):
+                    st.text_area("Markdown", st.session_state['report_markdown'], height=300)
+                base_fn = (st.session_state.get('source_meta', {}) or {}).get('filename','rapor').rsplit('.',1)[0]
+                from datetime import datetime
+                ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+                json_name = f"{base_fn}_rapor_{ts}.json"
+                md_name = f"{base_fn}_rapor_{ts}.md"
+                dcol1, dcol2, dcol3 = st.columns(3)
+                with dcol1:
+                    st.download_button(
+                        "JSON İndir",
+                        data=st.session_state['report_json'],
+                        file_name=json_name,
+                        mime="application/json",
+                        type="primary"
+                    )
+                with dcol2:
+                    st.download_button(
+                        "Markdown İndir",
+                        data=st.session_state['report_markdown'],
+                        file_name=md_name,
+                        mime="text/markdown",
+                        type="secondary"
+                    )
+                with dcol3:
+                    # HTML üretme (isteğe bağlı anlık)
+                    from app.core.report import export_html
+                    html_name = f"{base_fn}_rapor_{ts}.html"
+                    try:
+                        html_data = export_html(st.session_state['report_data'])
+                        st.download_button(
+                            "HTML İndir",
+                            data=html_data,
+                            file_name=html_name,
+                            mime="text/html",
+                            type="secondary"
+                        )
+                    except Exception as e:
+                        st.warning(f"HTML üretimi başarısız: {e}")
+                st.info("PDF export henüz eklenmedi (TODO).")
 

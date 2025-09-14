@@ -1,4 +1,4 @@
-"""Basit chunking & embedding cache testi.
+"""MANUAL: Basit chunking & embedding cache testi.
 Çalıştır:
     (Önerilen) python -m scripts.test_chunking
     (Alternatif)  python scripts/test_chunking.py

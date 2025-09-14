@@ -1,4 +1,4 @@
-"""Pedagogy metrik test scripti.
+"""MANUAL: Pedagogy metrik test scripti.
 Çeşitli transkript senaryoları üzerinde heuristic skorları gösterir.
 Çalıştırma: python scripts/test_pedagogy.py
 """

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os, json, hashlib
 from typing import List, Dict, Optional
+import time
 
 _EMBED_CACHE_PATH = os.path.join('.cache', 'embeddings.jsonl')
 _memory_cache: Dict[str, List[float]] = {}
@@ -83,19 +84,58 @@ def _fake_embed(text: str, dim: int = 8) -> List[float]:
 	return [x / norm for x in arr]
 
 
-def embed_texts(texts: List[str], model: str = 'text-embedding-004', use_real: bool = False) -> List[List[float]]:
-	"""Gerçek Gemini entegrasyonu TODO: use_real=True olduğunda google-generativeai çağır.
-	Şimdilik hızlı prototip için _fake_embed.
+def embed_texts(texts: List[str], model: str = 'text-embedding-004', use_real: bool = False, retries: int = 3, backoff: float = 1.5) -> List[List[float]]:
+	"""Metin listesi için embedding döndür.
+
+	Parametreler:
+	  texts: gömülmesi istenen metinler
+	  model: gemini embedding modeli (varsayılan: text-embedding-004)
+	  use_real: True ise Gemini API çağrısı yapılır, aksi halde deterministik fake vektör
+	  retries: başarısız gerçek çağrı deneme sayısı
+	  backoff: exponential backoff tabanı (saniye)
+
+	Hata / fallback stratejisi:
+	  - API key yoksa fake'e düş
+	  - API çağrısı 429/5xx veya diğer Exception üretirse retry, sonra fake kalanları doldur
 	"""
 	vectors: List[List[float]] = []
-	if use_real:
-		# TODO: gerçek API entegrasyonu
-		# import google.generativeai as genai
-		# genai.configure(api_key=...)
-		# ... çağrı ve sonuç parse ...
-		pass
-	for t in texts:
-		vectors.append(_fake_embed(t))
+	if not use_real:
+		return [_fake_embed(t) for t in texts]
+
+	api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
+	if not api_key:
+		# Anahtar yok; sessiz fallback
+		return [_fake_embed(t) for t in texts]
+
+	try:
+		import google.generativeai as genai  # type: ignore
+		genai.configure(api_key=api_key)
+	except Exception:
+		# Kütüphane yok veya yapılandırma hatası → fake
+		return [_fake_embed(t) for t in texts]
+
+	for text in texts:
+		success = False
+		for attempt in range(retries):
+			try:
+				resp = genai.embed_content(model=model, content=text)
+				emb = resp.get('embedding') or resp.get('data') or resp  # API varyasyon güvenliği
+				if isinstance(emb, dict) and 'embedding' in emb:
+					emb = emb['embedding']
+				if not isinstance(emb, list):
+					raise ValueError('Embedding formatı beklenmedik.')
+				vectors.append(emb)
+				success = True
+				break
+			except Exception:
+				if attempt < retries - 1:
+					time.sleep(backoff * (2 ** attempt))
+				else:
+					# Son deneme de başarısız: fake fallback bu metin için
+					vectors.append(_fake_embed(text, dim=8))
+		if not success:
+			# Fallback eklenmiş durumda; success False kalsa da ilerlenebilir
+			continue
 	return vectors
 
 

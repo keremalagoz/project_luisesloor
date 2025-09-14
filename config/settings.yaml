@@ -63,3 +63,6 @@ filler_words:
 
 export:
   formats: ["json", "md", "pdf"]
+
+api_keys:
+  gemini: $(GEMINI_API_KEY)

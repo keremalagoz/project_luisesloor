@@ -164,10 +164,67 @@ def export_json(report: Dict[str, Any]) -> str:
     return json.dumps(report, ensure_ascii=False, indent=2)
 
 
+def export_html(report: Dict[str, Any]) -> str:
+    """Raporu basit HTML'e dönüştür.
+
+    Önce markdown metni üretir, ardından:
+      - markdown paketi varsa onunla dönüştürür
+      - yoksa minimal bir dönüştürme (başlıklar, tablolar, code block) uygular
+    """
+    md = render_markdown(report)
+    # Deneme: markdown kütüphanesi
+    try:
+        import markdown  # type: ignore
+        return "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Rapor</title>" \
+               "<style>body{font-family:Arial,Helvetica,sans-serif;max-width:860px;margin:2rem auto;line-height:1.5;}table{border-collapse:collapse;width:100%;margin:1rem 0;}th,td{border:1px solid #ccc;padding:4px 6px;text-align:left;}pre{background:#f5f5f5;padding:8px;overflow:auto;}code{background:#f2f2f2;padding:2px 4px;border-radius:3px;}</style></head><body>" \
+               + markdown.markdown(md, extensions=['tables','fenced_code']) + "</body></html>"
+    except Exception:
+        # Minimal fallback: sadece çok basit dönüşüm
+        lines = []
+        in_code = False
+        for line in md.splitlines():
+            if line.startswith('```'):
+                if not in_code:
+                    lines.append('<pre><code>')
+                    in_code = True
+                else:
+                    lines.append('</code></pre>')
+                    in_code = False
+                continue
+            if in_code:
+                lines.append(line.replace('&','&amp;').replace('<','&lt;').replace('>','&gt;'))
+                continue
+            if line.startswith('# '):
+                lines.append(f"<h1>{line[2:].strip()}</h1>")
+            elif line.startswith('## '):
+                lines.append(f"<h2>{line[3:].strip()}</h2>")
+            elif line.startswith('| ') and line.endswith(' |'):
+                # Çok basit tablo yakalama (önceki 2 satırı birleştirme yok - tek seferde blok oluşacağı varsayılır)
+                # Burada sadece satırı aynen <pre> içine alalım basitlik için
+                lines.append(f"<div style='font-family:monospace;white-space:pre'>{line}</div>")
+            elif line.strip() == '':
+                lines.append('<br/>')
+            else:
+                lines.append(f"<p>{line}</p>")
+        html_body = '\n'.join(lines)
+        return "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Rapor</title></head><body>" + html_body + "</body></html>"
+
+
+def export_pdf(report: Dict[str, Any]) -> bytes:
+    """PDF export stub.
+
+    Gelecekte: weasyprint veya pdfkit ile HTML'den PDF.
+    Şimdilik NotImplementedError döner.
+    """
+    raise NotImplementedError("PDF export henüz implemente edilmedi.")
+
+
 __all__ = [
     'build_report_data',
     'render_markdown',
     'export_json',
+    'export_html',
+    'export_pdf',
 ]
 """Rapor üretimi (yer tutucu)
 - JSON ve Markdown çıktıları
