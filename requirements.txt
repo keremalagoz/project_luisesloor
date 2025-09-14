@@ -11,3 +11,4 @@ faster-whisper
 pydub
 PyYAML
 tiktoken
+streamlit-webrtc

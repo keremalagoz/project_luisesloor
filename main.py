@@ -7,8 +7,29 @@ import streamlit as st
 from app.core import ingestion
 from app.core.chunking import tokenize_and_chunk
 from app.core.embeddings import get_or_compute_embeddings
+from app.core.config import get_settings, get_validation
+from app.core.logger import get_logger
 
 st.set_page_config(page_title="AI Teaching Assistant", layout="wide")
+
+logger = get_logger()
+settings = get_settings()
+validation = get_validation()
+
+# Sidebar'da config & validation durumu
+with st.sidebar.expander("⚙️ Config & Validation", expanded=not validation['is_valid']):
+    st.write({
+        'valid': validation['is_valid'],
+        'errors': validation['errors'],
+        'warnings': validation['warnings'],
+    })
+    if not validation['is_valid']:
+        st.error("Config hataları mevcut. Lütfen düzeltin.")
+    elif validation['warnings']:
+        st.warning("Config uyarıları var. Ayrıntılar yukarıda.")
+
+if not validation['is_valid']:
+    st.warning("Config doğrulama hataları var; bazı analizler beklenmeyen sonuç verebilir.")
 
 st.title("📘 Ders Materyali Yükleme")
 st.caption("Adım 1: PDF veya TXT materyalini yükle, metni çıkar ve onayla.")
@@ -151,29 +172,118 @@ Sonuç""".strip()
     if 'source_text' not in st.session_state:
         st.info("Önce materyali yükleyin (Adım 1).")
     else:
+        # --- STT / Audio Upload Bölümü ---
+        with st.expander("🎤 Ses Dosyasından Transcribe (Opsiyonel)", expanded=False):
+            st.caption("MP3/WAV yükle veya mikrofon kaydı (mikrofon entegrasyonu bir sonraki adımda eklenecek).")
+            audio_file = st.file_uploader("Ses Dosyası Seç (mp3/wav/m4a)", type=["mp3","wav","m4a"], accept_multiple_files=False)
+            stt_cols = st.columns([1,1,1])
+            with stt_cols[0]:
+                use_real_stt = st.checkbox("Gerçek STT", value=False, help="faster-whisper yüklüyse gerçek transcribe, yoksa fake.")
+            with stt_cols[1]:
+                lang_override = st.text_input("Dil Override", value="", help="Boş bırak otomatik tespit (ör: en, tr, de)")
+            with stt_cols[2]:
+                model_size = st.selectbox("Model Boyutu", ["tiny","base","small"], index=2)
+            if audio_file and st.button("Transcribe Çalıştır"):
+                from app.core.stt import transcribe_audio
+                data = audio_file.read()
+                with st.spinner("Ses çözümleniyor..."):
+                    res = transcribe_audio(data, lang=lang_override or None, model_size=model_size, use_real=use_real_stt)
+                st.session_state['transcript_text'] = res['text']
+                # Süreyi set et (mevcut duration 0 ise veya kullanıcı henüz girmediyse)
+                auto_minutes = (res.get('duration_seconds') or 0.0) / 60.0
+                if auto_minutes > 0:
+                    st.session_state['auto_duration_min'] = auto_minutes
+                st.success(f"Transcribe tamamlandı (model={res['model']} cached={res['cached']}).")
+                with st.expander("Transcribe Çıktısı", expanded=False):
+                    st.text_area("Metin", value=res['text'][:5000], height=200)
+                if res.get('segments'):
+                    with st.expander("Segmentler", expanded=False):
+                        import pandas as pd
+                        seg_df = pd.DataFrame(res['segments'])
+                        st.dataframe(seg_df.head(50), use_container_width=True)
+            st.markdown("---")
+            st.caption("Mikrofon Kaydı (Beta) - Kaydı bitirince tamamını işleyip transcript üretir.")
+            try:
+                from streamlit_webrtc import webrtc_streamer, WebRtcMode
+                import av, time, threading, queue
+                from app.core.stt import transcribe_audio as _mic_transcribe
+
+                if 'mic_audio_chunks' not in st.session_state:
+                    st.session_state['mic_audio_chunks'] = []
+                if 'mic_recording' not in st.session_state:
+                    st.session_state['mic_recording'] = False
+
+                audio_q: "queue.Queue[bytes]" = queue.Queue()
+
+                def audio_frame_callback(frame: 'av.AudioFrame'):
+                    if not st.session_state.get('mic_recording'):
+                        return frame
+                    # PCM bytes elde et
+                    pcm = frame.to_ndarray().tobytes()
+                    audio_q.put(pcm)
+                    return frame
+
+                webrtc_ctx = webrtc_streamer(
+                    key="mic",
+                    mode=WebRtcMode.SENDONLY,
+                    audio_receiver_size=256,
+                    media_stream_constraints={"video": False, "audio": True},
+                    async_processing=True,
+                    audio_frame_callback=audio_frame_callback,
+                )
+
+                col_m1, col_m2, col_m3 = st.columns([1,1,2])
+                with col_m1:
+                    if not st.session_state['mic_recording']:
+                        if st.button("Kaydı Başlat"):
+                            st.session_state['mic_recording'] = True
+                            st.session_state['mic_audio_chunks'] = []
+                            st.session_state['mic_recording_started'] = time.time()
+                            st.info("Kayıt başladı...")
+                    else:
+                        if st.button("Kaydı Bitir"):
+                            st.session_state['mic_recording'] = False
+                            # Kuyruktaki tüm veriyi topla
+                            collected = []
+                            while not audio_q.empty():
+                                collected.append(audio_q.get())
+                            raw_bytes = b"".join(collected)
+                            if not raw_bytes:
+                                st.warning("Kayıt boş görünüyor.")
+                            else:
+                                with st.spinner("Mikrofon kaydı işleniyor..."):
+                                    res = _mic_transcribe(raw_bytes, lang=None, model_size=model_size, use_real=use_real_stt)
+                                st.session_state['transcript_text'] = res['text'] or st.session_state.get('transcript_text', '')
+                                dur_min = (res.get('duration_seconds') or 0.0) / 60.0
+                                if dur_min > 0:
+                                    st.session_state['auto_duration_min'] = dur_min
+                                st.success("Mikrofon kaydı transcribe edildi.")
+                                with st.expander("Mikrofon Transcribe Metni", expanded=False):
+                                    st.text_area("Metin", value=res['text'][:5000], height=200)
+                with col_m2:
+                    if st.session_state.get('mic_recording'):
+                        elapsed = time.time() - st.session_state.get('mic_recording_started', time.time())
+                        st.write(f"Süre: {elapsed:.1f}s")
+                with col_m3:
+                    st.write("Durum: "+ ("Kayıt" if st.session_state.get('mic_recording') else "Hazır"))
+            except Exception as e:
+                st.info(f"Mikrofon modu kullanılamıyor: {e}")
+        # --- /STT Bölümü ---
         with st.expander("Transkript giriş (manuel veya STT çıktısı yapıştır)", expanded=False):
             default_tx = st.session_state.get('transcript_text') or st.session_state['source_text'][:1000]
             transcript_text = st.text_area("Transkript", value=default_tx, height=200)
             st.session_state['transcript_text'] = transcript_text
         colA, colB = st.columns(2)
         with colA:
-            duration_min = st.number_input("Süre (dakika)", min_value=0.0, value=0.0, step=0.5, help="0 girersen tahmini süre (150 WPM varsayımı) kullanılır.")
+            prefill_dur = st.session_state.get('auto_duration_min', 0.0)
+            duration_min = st.number_input("Süre (dakika)", min_value=0.0, value=prefill_dur, step=0.5, help="0 girersen tahmini süre (150 WPM varsayımı) kullanılır.")
         with colB:
             show_config = st.checkbox("Konfig detaylarını göster", value=False)
         if st.button("Delivery Hesapla", type="primary"):
             from app.core.delivery import compute_delivery_metrics
-            import yaml, os
-            cfg_path = os.path.join('config','settings.yaml')
-            custom_cfg = {}
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, 'r', encoding='utf-8') as f:
-                        y = yaml.safe_load(f) or {}
-                        delivery_cfg = y.get('metrics', {}).get('delivery', {})
-                        # weights alt yapısını compute fonksiyonundaki beklenen forma uydur.
-                        custom_cfg.update(delivery_cfg)
-                except Exception:
-                    pass
+            # Yeni config modülü üzerinden al
+            delivery_cfg = (settings.get('metrics') or {}).get('delivery', {}) or {}
+            custom_cfg = dict(delivery_cfg)
             with st.spinner("Delivery metrikleri hesaplanıyor..."):
                 res = compute_delivery_metrics(transcript_text, duration_minutes=duration_min, config=custom_cfg)
                 st.session_state['delivery'] = res
@@ -217,16 +327,7 @@ Sonuç""".strip()
                 st.code(st.session_state['transcript_text'][:600])
             if st.button("Pedagogy Hesapla", type="primary"):
                 from app.core.pedagogy import compute_pedagogy_metrics
-                import yaml, os
-                ped_cfg = {}
-                cfg_path = os.path.join('config','settings.yaml')
-                if os.path.exists(cfg_path):
-                    try:
-                        with open(cfg_path, 'r', encoding='utf-8') as f:
-                            y = yaml.safe_load(f) or {}
-                            ped_cfg = y.get('metrics', {}).get('pedagogy', {})
-                    except Exception:
-                        pass
+                ped_cfg = (settings.get('metrics') or {}).get('pedagogy', {}) or {}
                 with st.spinner("Pedagogy metrikleri hesaplanıyor..."):
                     ped = compute_pedagogy_metrics(st.session_state['transcript_text'], config=ped_cfg)
                     st.session_state['pedagogy'] = ped
@@ -287,15 +388,7 @@ Sonuç""".strip()
             save_col1, save_col2 = st.columns([1,2])
             db_path = None
             # config/settings.yaml içinden yol okunabilir; dinamik parse gerekirse burada yapılabilir.
-            import yaml, os
-            cfg_file = os.path.join('config','settings.yaml')
-            if os.path.exists(cfg_file):
-                try:
-                    with open(cfg_file,'r',encoding='utf-8') as f:
-                        y = yaml.safe_load(f) or {}
-                        db_path = (y.get('app') or {}).get('db_path')
-                except Exception:
-                    db_path = None
+            db_path = (settings.get('app') or {}).get('db_path')
 
             if st.button("Run Kaydet", type="primary"):
                 try:
@@ -410,4 +503,158 @@ Sonuç""".strip()
                     except Exception as e:
                         st.warning(f"HTML üretimi başarısız: {e}")
                 st.info("PDF export henüz eklenmedi (TODO).")
+
+            # ------------------------------------------------------------------
+            # Run History & Karşılaştırma
+            st.divider()
+            st.subheader("🕓 Run History ve Karşılaştırma")
+            st.caption("Kaydedilmiş önceki analizleri incele ve iki run arasında metrik farklarını gör.")
+            try:
+                from app.core import storage as _stg
+                # DB path belirle
+                db_path = None
+                db_path = (settings.get('app') or {}).get('db_path')
+                recent_runs = _stg.fetch_recent_runs(db_path=db_path)
+                if not recent_runs:
+                    st.info("Kayıtlı run bulunamadı.")
+                else:
+                    import pandas as pd
+                    # Liste görünümü
+                    with st.expander("Son Run Listesi", expanded=False):
+                        st.dataframe(pd.DataFrame(recent_runs), use_container_width=True)
+                    # Seçim
+                    run_ids = [r['id'] for r in recent_runs]
+                    col_r1, col_r2, col_r3 = st.columns([1,1,2])
+                    with col_r1:
+                        sel_run = st.selectbox("Run Seç (A)", run_ids, key="run_select_a")
+                    with col_r2:
+                        sel_run_b = st.selectbox("Karşılaştır (B - opsiyonel)", [None] + run_ids, key="run_select_b")
+                    load_btn = st.button("Run Detay Yükle", type="secondary")
+                    if load_btn and sel_run:
+                        try:
+                            run_a = _stg.fetch_run_details(sel_run, db_path=db_path)
+                            st.session_state['history_run_a'] = run_a
+                            if sel_run_b:
+                                run_b = _stg.fetch_run_details(sel_run_b, db_path=db_path)
+                                st.session_state['history_run_b'] = run_b
+                            else:
+                                st.session_state.pop('history_run_b', None)
+                            st.success("Run detay(ları) yüklendi.")
+                        except Exception as e:
+                            st.error(f"Detay yüklenemedi: {e}")
+
+                    # Detay gösterimi
+                    if 'history_run_a' in st.session_state:
+                        run_a = st.session_state['history_run_a']
+                        st.markdown(f"**Seçilen Run A:** ID={run_a.get('id')} | Toplam Skor={run_a.get('total_score')}")
+                        with st.expander("Run A Metrik Detayları", expanded=False):
+                            # Metrikleri tabloya dönüştür
+                            m_rows = []
+                            for m in run_a.get('metrics', []):
+                                m_rows.append({
+                                    'category': m.get('category'),
+                                    'name': m.get('name'),
+                                    'raw_value': m.get('raw_value'),
+                                    'score': m.get('score'),
+                                })
+                            if m_rows:
+                                st.dataframe(pd.DataFrame(m_rows), use_container_width=True)
+                            else:
+                                st.write("Metrik yok.")
+                        if run_a.get('topics'):
+                            with st.expander("Run A Coverage Topics", expanded=False):
+                                t_df = pd.DataFrame(run_a['topics'])
+                                st.dataframe(t_df, use_container_width=True)
+
+                    # Karşılaştırma
+                    if 'history_run_a' in st.session_state and 'history_run_b' in st.session_state:
+                        run_a = st.session_state['history_run_a']
+                        run_b = st.session_state['history_run_b']
+                        st.markdown(f"**Karşılaştırma: A={run_a.get('id')} vs B={run_b.get('id')}**")
+                        try:
+                            from app.core.history import compare_runs
+                            cmp = compare_runs(run_a, run_b)
+                            summary = cmp['summary']
+                            cols_cmp = st.columns(5)
+                            cols_cmp[0].metric("Toplam A", f"{summary.get('total_score_a')}")
+                            cols_cmp[1].metric("Toplam B", f"{summary.get('total_score_b')}")
+                            delta_total = summary.get('total_score_delta')
+                            cols_cmp[2].metric("Delta", f"{delta_total:+.3f}" if isinstance(delta_total,(int,float)) else str(delta_total))
+                            cols_cmp[3].metric("İyileşen", summary.get('count_improved'))
+                            cols_cmp[4].metric("Gerileyen", summary.get('count_declined'))
+
+                            # Metrik delta tablosu
+                            table_rows = []
+                            for r in cmp['metrics']:
+                                direction_symbol = {'up':'↑','down':'↓','flat':'→'}.get(r['direction'],'?')
+                                table_rows.append({
+                                    'category': r['category'],
+                                    'name': r['name'],
+                                    'A': r['a'],
+                                    'B': r['b'],
+                                    'delta': r['delta'],
+                                    'trend': direction_symbol,
+                                })
+                            if table_rows:
+                                import pandas as pd
+                                df_cmp = pd.DataFrame(table_rows)
+                                st.dataframe(df_cmp, use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Karşılaştırma hatası: {e}")
+            except Exception as e:
+                st.warning(f"Run history yüklenemedi: {e}")
+
+        # ------------------------------------------------------------------
+        # Adım 7: Trend & Progress Dashboard
+        st.divider()
+        st.header("📉 Adım 7: Trend & Progress")
+        st.caption("Run skorlarının zaman içindeki gelişimini incele.")
+        from app.core import storage as _stg2
+        from app.core.trends import prepare_run_dataframe, compute_basic_deltas, top_improvements
+        db_path2 = (settings.get('app') or {}).get('db_path')
+        try:
+            all_runs = _stg2.fetch_recent_runs(limit=200, db_path=db_path2)
+        except Exception as e:
+            all_runs = []
+            st.warning(f"Run sorgusu başarısız: {e}")
+        if len(all_runs) < 2:
+            st.info("Trend analizi için en az 2 run gerekli.")
+        else:
+            max_n = st.slider("Kaç run gösterilsin?", min_value=2, max_value=min(50, len(all_runs)), value=min(10, len(all_runs)))
+            subset = list(reversed(all_runs))[:max_n]  # en yeni başa dönmüş olabilir, ters çevir
+            subset = list(reversed(subset))  # kronolojik sıraya sok
+            df = prepare_run_dataframe(subset)
+            import pandas as pd
+            score_cols = ['total_score','coverage_score','delivery_score','pedagogy_score']
+            # Line chart (Altair opsiyonel yoksa built-in)
+            chart_df = df[['id'] + [c for c in score_cols if c in df.columns]].copy()
+            chart_df = chart_df.melt(id_vars='id', var_name='metric', value_name='value')
+            st.line_chart(chart_df, x='id', y='value', color='metric')
+            deltas = compute_basic_deltas(df)
+            if deltas:
+                st.subheader("Delta (İlk vs Son Run)")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Total Δ", f"{deltas['total_score_delta']:+.3f}" if deltas['total_score_delta'] is not None else '-')
+                c2.metric("Coverage Δ", f"{deltas['coverage_score_delta']:+.3f}" if deltas['coverage_score_delta'] is not None else '-')
+                c3.metric("Delivery Δ", f"{deltas['delivery_score_delta']:+.3f}" if deltas['delivery_score_delta'] is not None else '-')
+                c4.metric("Pedagogy Δ", f"{deltas['pedagogy_score_delta']:+.3f}" if deltas['pedagogy_score_delta'] is not None else '-')
+            imp = top_improvements(df, score_cols, top_n=3)
+            col_imp, col_dec = st.columns(2)
+            with col_imp:
+                st.markdown("**En Çok İyileşen**")
+                if not imp['improved']:
+                    st.write("Yok")
+                else:
+                    for m, d in imp['improved']:
+                        st.write(f"{m}: +{d:.3f}")
+            with col_dec:
+                st.markdown("**En Çok Gerileyen**")
+                if not imp['declined']:
+                    st.write("Yok")
+                else:
+                    for m, d in imp['declined']:
+                        st.write(f"{m}: {d:.3f}")
+            with st.expander("Skor Tablosu", expanded=False):
+                st.dataframe(df[['id'] + score_cols], use_container_width=True)
+
 
