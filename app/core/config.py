@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import re
 import yaml
 from typing import Any, Dict, Tuple, List, Optional
@@ -39,11 +40,54 @@ def load_settings(path: str = 'config/settings.yaml', force: bool = False) -> Di
     global _SETTINGS_CACHE
     if _SETTINGS_CACHE is not None and not force:
         return _SETTINGS_CACHE
+    # .env yükleyici (opsiyonel)
+    try:
+        from dotenv import load_dotenv  # type: ignore
+        # Önce kök .env, sonra config/.env (ikisini de dene)
+        load_dotenv()
+        cfg_env = Path('config') / '.env'
+        if cfg_env.exists():
+            load_dotenv(dotenv_path=str(cfg_env), override=True)
+    except Exception:
+        pass
     if not os.path.exists(path):
         raise FileNotFoundError(f"Config dosyası bulunamadı: {path}")
     with open(path, 'r', encoding='utf-8') as f:
         data = yaml.safe_load(f) or {}
     data = _expand_env_values(data)
+    # Varsayılan ek alanlar (eksikse doldur)
+    defaults = {
+        'rag': {
+            'max_chunks': 5,
+            'max_context_chars': 4000,
+            'retrieval': {
+                'default_hybrid_enabled': False,
+                'default_alpha': 1.0,
+                'default_top_k': 5,
+            },
+            'confidence': {
+                'low': 0.5,
+                'medium': 0.7,
+            },
+        },
+        'models': {
+            'llm_model': 'gpt-5-nano',
+        },
+        'stt': {
+            'provider': 'openai',
+            'openai_model': 'whisper-1'
+        }
+    }
+    def merge(dst, src):
+        for k,v in src.items():
+            if isinstance(v, dict):
+                node = dst.setdefault(k, {}) if isinstance(dst.get(k), dict) else {}
+                if k not in dst or not isinstance(dst.get(k), dict):
+                    dst[k] = {}
+                merge(dst[k], v)
+            else:
+                dst.setdefault(k, v)
+    merge(data, defaults)
     _SETTINGS_CACHE = data
     return data
 

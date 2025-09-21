@@ -81,6 +81,42 @@ def _fake_result(duration: float, data_len: int) -> Dict[str, Any]:
     }
 
 
+def _openai_whisper_transcribe(data: bytes, lang: Optional[str]) -> Optional[Dict[str, Any]]:
+    """OpenAI Audio Transcriptions API kullanarak transcribe dener.
+    Başarısız olursa None döner.
+    """
+    api_key = os.getenv('OPENAI_API_KEY')
+    if not api_key:
+        return None
+    try:  # type: ignore
+        from openai import OpenAI  # type: ignore
+        import tempfile
+        client = OpenAI(api_key=api_key)
+        # Geçici dosyaya yazıp gönderelim
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=True) as tmp:
+            tmp.write(data)
+            tmp.flush()
+            res = client.audio.transcriptions.create(
+                model=os.getenv('OPENAI_WHISPER_MODEL', 'whisper-1'),
+                file=open(tmp.name, 'rb'),
+                language=lang or None,
+            )
+        text = getattr(res, 'text', None) or (res.get('text') if isinstance(res, dict) else None)
+        if not text:
+            return None
+        return {
+            'text': text,
+            'segments': [],
+            'duration_seconds': 0.0,
+            'language': lang,
+            'model': 'openai-whisper',
+            'cached': False,
+        }
+    except Exception as e:  # pragma: no cover
+        logger.warning("OpenAI whisper transcribe başarısız: %s", e)
+        return None
+
+
 def transcribe_audio(data: bytes, *, lang: Optional[str] = None, model_size: str = 'small', use_real: bool = True) -> Dict[str, Any]:
     """Ses bytes -> transcript sözlüğü döndür.
 
@@ -95,7 +131,29 @@ def transcribe_audio(data: bytes, *, lang: Optional[str] = None, model_size: str
 
     duration = _estimate_duration(data)
 
-    if not use_real or not _FASTER_AVAILABLE:
+    # Sağlayıcı seçimi: config.stt.provider == 'openai' ise önce OpenAI dene
+    stt_provider = (os.getenv('STT_PROVIDER') or '').lower()
+    try:
+        from app.core.config import get_settings  # local import
+        stt_cfg = (get_settings().get('stt') or {})
+        if isinstance(stt_cfg, dict):
+            stt_provider = (stt_cfg.get('provider') or stt_provider or '').lower()
+    except Exception:
+        pass
+
+    if not use_real:
+        res = _fake_result(duration, len(data))
+        _TRANSCRIPT_CACHE[file_hash] = res
+        return res
+
+    if stt_provider == 'openai':
+        res_openai = _openai_whisper_transcribe(data, lang)
+        if res_openai:
+            _TRANSCRIPT_CACHE[file_hash] = res_openai
+            return res_openai
+        # OpenAI başarısızsa faster’a düşer
+
+    if not _FASTER_AVAILABLE:
         res = _fake_result(duration, len(data))
         _TRANSCRIPT_CACHE[file_hash] = res
         return res

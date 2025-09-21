@@ -12,3 +12,4 @@ pydub
 PyYAML
 tiktoken
 streamlit-webrtc
+python-dotenv

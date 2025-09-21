@@ -202,11 +202,12 @@ Sonuç""".strip()
                         seg_df = pd.DataFrame(res['segments'])
                         st.dataframe(seg_df.head(50), use_container_width=True)
             st.markdown("---")
-            st.caption("Mikrofon Kaydı (Beta) - Kaydı bitirince tamamını işleyip transcript üretir.")
+            st.caption("Mikrofon Kaydı (Beta) - Tam kayıt veya deneysel canlı (streaming) partial transcript.")
             try:
                 from streamlit_webrtc import webrtc_streamer, WebRtcMode
                 import av, time, threading, queue
                 from app.core.stt import transcribe_audio as _mic_transcribe
+                from app.core.streaming_stt import StreamingTranscriber
 
                 if 'mic_audio_chunks' not in st.session_state:
                     st.session_state['mic_audio_chunks'] = []
@@ -234,11 +235,16 @@ Sonuç""".strip()
 
                 col_m1, col_m2, col_m3 = st.columns([1,1,2])
                 with col_m1:
+                    streaming_mode = st.checkbox("Canlı Streaming", value=False, help="Deneysel: belirli aralıklarla partial transcript üretir.")
+                    if streaming_mode and 'stream_transcriber' not in st.session_state:
+                        st.session_state['stream_transcriber'] = StreamingTranscriber(use_real=use_real_stt, model_size=model_size, lang=lang_override or None)
                     if not st.session_state['mic_recording']:
                         if st.button("Kaydı Başlat"):
                             st.session_state['mic_recording'] = True
                             st.session_state['mic_audio_chunks'] = []
                             st.session_state['mic_recording_started'] = time.time()
+                            if streaming_mode:
+                                st.session_state['stream_partial_text'] = ""
                             st.info("Kayıt başladı...")
                     else:
                         if st.button("Kaydı Bitir"):
@@ -260,12 +266,32 @@ Sonuç""".strip()
                                 st.success("Mikrofon kaydı transcribe edildi.")
                                 with st.expander("Mikrofon Transcribe Metni", expanded=False):
                                     st.text_area("Metin", value=res['text'][:5000], height=200)
+                            # Streaming transcriber kapat
+                            if streaming_mode and 'stream_transcriber' in st.session_state:
+                                final_full = st.session_state['stream_transcriber'].close()
+                                if final_full:
+                                    st.session_state['transcript_text'] = final_full
+                                st.session_state.pop('stream_transcriber', None)
                 with col_m2:
                     if st.session_state.get('mic_recording'):
                         elapsed = time.time() - st.session_state.get('mic_recording_started', time.time())
                         st.write(f"Süre: {elapsed:.1f}s")
+                        if streaming_mode and 'stream_transcriber' in st.session_state:
+                            # Kuyruktaki veriyi al ve feed et
+                            collected = []
+                            while not audio_q.empty():
+                                collected.append(audio_q.get())
+                            if collected:
+                                chunk_bytes = b"".join(collected)
+                                partial = st.session_state['stream_transcriber'].feed(chunk_bytes)
+                                if partial and partial.get('new_text'):
+                                    existing = st.session_state.get('stream_partial_text','')
+                                    st.session_state['stream_partial_text'] = existing + partial['new_text']
                 with col_m3:
                     st.write("Durum: "+ ("Kayıt" if st.session_state.get('mic_recording') else "Hazır"))
+                    if streaming_mode and st.session_state.get('mic_recording'):
+                        st.markdown("**Canlı Partial:**")
+                        st.text_area("Partial", value=st.session_state.get('stream_partial_text','')[-1000:], height=150)
             except Exception as e:
                 st.info(f"Mikrofon modu kullanılamıyor: {e}")
         # --- /STT Bölümü ---
@@ -374,6 +400,23 @@ Sonuç""".strip()
             colA.metric("Coverage", f"{inputs['coverage']:.2f}")
             colB.metric("Delivery", f"{inputs['delivery']:.2f}")
             colC.metric("Pedagogy", f"{inputs['pedagogy']:.2f}")
+            # Öneriler
+            from app.core.recommendations import generate_recommendations
+            rec_obj = generate_recommendations(cov_obj, del_obj, ped_obj, agg)
+            if rec_obj['recommendations']:
+                with st.expander("Öneriler (Beta)", expanded=True):
+                    sev_icons = {'high':'🔴','medium':'🟡','low':'🟢'}
+                    for r in rec_obj['recommendations'][:10]:
+                        icon = sev_icons.get(r['severity'],'•')
+                        st.markdown(f"{icon} **[{r['category']}]** {r['message']}  ")
+                        with st.popover("Detay", use_container_width=True):
+                            st.write({
+                                'severity': r['severity'],
+                                'rationale': r['rationale'],
+                                'meta': r.get('meta')
+                            })
+            else:
+                st.info("Öneri üretilemedi (yeterince veri yok veya tüm skorlar yüksek).")
             with st.expander("Ağırlıklar ve Detay", expanded=False):
                 st.write({
                     'weights_used': agg['weights_used'],
@@ -455,6 +498,31 @@ Sonuç""".strip()
                     pedagogy=ped_obj,
                     scoring=agg,
                 )
+                # Öneriler ekle (opsiyonel)
+                try:
+                    from app.core.recommendations import generate_recommendations as _gen_recs
+                    recs_for_report = _gen_recs(cov_obj, del_obj, ped_obj, agg)
+                    report_data['recommendations'] = recs_for_report
+                except Exception as e:
+                    logger.warning(f"Öneriler rapora eklenemedi: {e}")
+                # RAG özeti ekle (varsa)
+                try:
+                    if 'rag_last_answer' in st.session_state:
+                        rag_section = {
+                            'question': st.session_state.get('rag_last_question'),
+                            'answer': st.session_state['rag_last_answer'],
+                        }
+                        if 'rag_last_results' in st.session_state:
+                            rag_section['sources'] = [
+                                {'id': r.get('id'), 'similarity': r.get('similarity')}
+                                for r in st.session_state['rag_last_results'][:5]
+                            ]
+                        mode = st.session_state.get('rag_last_retrieval_mode')
+                        if mode:
+                            rag_section['retrieval_mode'] = mode
+                        report_data['rag'] = rag_section
+                except Exception as e:
+                    logger.warning(f"RAG bölümü rapora eklenemedi: {e}")
                 md_text = render_markdown(report_data)
                 json_text = export_json(report_data)
                 st.session_state['report_data'] = report_data
@@ -502,7 +570,29 @@ Sonuç""".strip()
                         )
                     except Exception as e:
                         st.warning(f"HTML üretimi başarısız: {e}")
-                st.info("PDF export henüz eklenmedi (TODO).")
+                # PDF Export
+                from app.core.report_pdf import export_pdf as export_pdf_bytes, PDFReportError
+                pdf_col = st.container()
+                try:
+                    if st.button("PDF Oluştur & İndir", type="secondary"):
+                        try:
+                            pdf_bytes = export_pdf_bytes(st.session_state['report_data'])
+                            pdf_name = f"{base_fn}_rapor_{ts}.pdf"
+                            st.download_button(
+                                "PDF İndir",
+                                data=pdf_bytes,
+                                file_name=pdf_name,
+                                mime="application/pdf",
+                                type="primary",
+                                key="pdf_download_btn"
+                            )
+                            st.success("PDF üretildi.")
+                        except PDFReportError as pe:
+                            st.error(f"PDF üretim hatası: {pe}")
+                        except Exception as e:
+                            st.error(f"Beklenmeyen PDF hatası: {e}")
+                except Exception as outer_e:
+                    st.warning(f"PDF export kullanılamıyor: {outer_e}")
 
             # ------------------------------------------------------------------
             # Run History & Karşılaştırma
@@ -617,12 +707,27 @@ Sonuç""".strip()
         except Exception as e:
             all_runs = []
             st.warning(f"Run sorgusu başarısız: {e}")
-        if len(all_runs) < 2:
+        run_count = len(all_runs)
+        if run_count < 2:
             st.info("Trend analizi için en az 2 run gerekli.")
         else:
-            max_n = st.slider("Kaç run gösterilsin?", min_value=2, max_value=min(50, len(all_runs)), value=min(10, len(all_runs)))
-            subset = list(reversed(all_runs))[:max_n]  # en yeni başa dönmüş olabilir, ters çevir
-            subset = list(reversed(subset))  # kronolojik sıraya sok
+            # Slider min<max zorunluluğu nedeniyle run_count==2 özel durumu ele al
+            min_allowed = 2
+            max_allowed = min(50, run_count)
+            if max_allowed <= min_allowed:
+                # Tam olarak 2 run var; slider yerine sabit değer göster
+                max_n = 2
+                st.caption("2 run bulundu – tümü gösteriliyor.")
+            else:
+                default_val = min(10, max_allowed)
+                max_n = st.slider(
+                    "Kaç run gösterilsin?",
+                    min_value=min_allowed,
+                    max_value=max_allowed,
+                    value=default_val,
+                )
+            subset = list(reversed(all_runs))[:max_n]
+            subset = list(reversed(subset))  # kronolojik sıra
             df = prepare_run_dataframe(subset)
             import pandas as pd
             score_cols = ['total_score','coverage_score','delivery_score','pedagogy_score']
@@ -656,5 +761,98 @@ Sonuç""".strip()
                         st.write(f"{m}: {d:.3f}")
             with st.expander("Skor Tablosu", expanded=False):
                 st.dataframe(df[['id'] + score_cols], use_container_width=True)
+
+        # ------------------------------------------------------------------
+        # Adım 8: RAG Soru-Cevap
+        st.divider()
+        st.header("🧠 Adım 8: Soru-Cevap (RAG)")
+        st.caption("Chunk + Embedding üzerinden basit retrieval ve extractive cevap.")
+        if 'embedded_chunks' not in st.session_state or not st.session_state['embedded_chunks']:
+            st.info("Önce Adım 2'de embedding oluştur.")
+        else:
+            from app.core.rag import build_index, similarity_search, generate_answer
+            rag_cfg = (settings.get('rag') or {})
+            rret = (rag_cfg.get('retrieval') or {})
+            default_hybrid = bool(rret.get('default_hybrid_enabled', False))
+            default_alpha = float(rret.get('default_alpha', 1.0))
+            default_topk = int(rret.get('default_top_k', 5))
+            if 'rag_index' not in st.session_state:
+                if st.button("RAG İndeksi Oluştur", type="secondary"):
+                    try:
+                        st.session_state['rag_index'] = build_index(st.session_state['embedded_chunks'])
+                        st.success("İndeks hazır.")
+                    except Exception as e:
+                        st.error(f"İndeks oluşturulamadı: {e}")
+            if 'rag_index' in st.session_state:
+                q_col1, q_col2, q_col3, q_col4 = st.columns([3,1,1,2])
+                with q_col1:
+                    user_query = st.text_input("Soru", value="Bu materyalin ana konusu nedir?")
+                with q_col2:
+                    top_k = st.number_input("Top-K", min_value=1, max_value=10, value=default_topk, step=1)
+                with q_col3:
+                    use_llm = st.checkbox("LLM Placeholder", value=False)
+                with q_col4:
+                    use_hybrid = st.checkbox("Hibrit Retrieval", value=default_hybrid)
+                    alpha = st.slider("Alpha (dense)", 0.0, 1.0, default_alpha, 0.05, disabled=not use_hybrid)
+                if st.button("Sorgula", type="primary"):
+                    if not user_query.strip():
+                        st.warning("Soru boş.")
+                    else:
+                        with st.spinner("Aranıyor..."):
+                            try:
+                                if use_hybrid:
+                                    results = similarity_search(st.session_state['rag_index'], user_query, use_real=False, top_k=top_k, hybrid_alpha=alpha)
+                                else:
+                                    results = similarity_search(st.session_state['rag_index'], user_query, use_real=False, top_k=top_k)
+                                answer_obj = generate_answer(user_query, results, llm=use_llm)
+                                st.session_state['rag_last_question'] = user_query
+                                st.session_state['rag_last_results'] = results
+                                st.session_state['rag_last_answer'] = answer_obj
+                                st.session_state['rag_last_retrieval_mode'] = 'hybrid' if use_hybrid else 'dense'
+                                st.success("Tamamlandı.")
+                            except Exception as e:
+                                st.error(f"Arama/cevap hatası: {e}")
+                # LLM ile Cevaplama
+                from app.core.llm import generate_llm_answer as _llm_answer
+                from app.core.config import get_settings as _get_cfg
+                if 'rag_last_results' in st.session_state and st.button("LLM ile Cevapla", type="secondary"):
+                    cfg = _get_cfg()
+                    with st.spinner("LLM cevabı üretiliyor..."):
+                        try:
+                            llm_ans = _llm_answer(user_query, st.session_state['rag_last_results'], settings=cfg)
+                            st.session_state['rag_llm_answer'] = llm_ans
+                            st.success("LLM cevabı hazır.")
+                        except Exception as e:
+                            st.error(f"LLM cevap hatası: {e}")
+                if 'rag_last_answer' in st.session_state:
+                    st.subheader("Cevap")
+                    st.write(st.session_state['rag_last_answer']['answer'])
+                    conf = st.session_state['rag_last_answer'].get('confidence')
+                    if conf is not None:
+                        # Confidence rozetini eşiklere göre göster
+                        cthr = (rag_cfg.get('confidence') or {})
+                        low = float(cthr.get('low', 0.5))
+                        med = float(cthr.get('medium', 0.7))
+                        if conf < low:
+                            badge = '🔴 düşük'
+                        elif conf < med:
+                            badge = '🟡 orta'
+                        else:
+                            badge = '🟢 yüksek'
+                        st.caption(f"Güven (avg similarity): {conf:.3f} — {badge}")
+                if 'rag_llm_answer' in st.session_state:
+                    st.subheader("LLM Cevabı")
+                    st.write(st.session_state['rag_llm_answer']['answer'])
+                if 'rag_last_results' in st.session_state:
+                    with st.expander("Kaynak Chunk'lar", expanded=False):
+                        import pandas as pd
+                        df_r = pd.DataFrame([
+                            {
+                                'id': r.get('id'),
+                                'similarity': round(r.get('similarity',0), 3),
+                                'preview': (r.get('text','')[:180] + '...') if len(r.get('text',''))>200 else r.get('text','')
+                            } for r in st.session_state.get('rag_last_results', [])
+                        ])
+                        st.dataframe(df_r, use_container_width=True)
 
 
